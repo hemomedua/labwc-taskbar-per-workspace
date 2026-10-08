@@ -21,26 +21,13 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - name: Enable Raspberry Pi apt repository
-        run: |
-          curl -fsSL https://archive.raspberrypi.com/debian/raspberrypi.gpg.key \
-            | gpg --dearmor -o /usr/share/keyrings/raspberrypi-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/raspberrypi-archive-keyring.gpg] http://archive.raspberrypi.com/debian/ trixie main" \
-            > /etc/apt/sources.list.d/raspi.list
-          apt-get update
-
-      - name: Build dependencies
-        run: |
-          apt-get install -y --no-install-recommends \
-            build-essential meson ninja-build pkg-config gettext xwayland \
-            libwlroots-0.19-dev libwayland-dev wayland-protocols libxkbcommon-dev \
-            libxcb1-dev libxcb-ewmh-dev libxcb-icccm4-dev libdrm-dev libxml2-dev \
-            libglib2.0-dev libcairo2-dev libpango1.0-dev libinput-dev \
-            libpixman-1-dev libpng-dev librsvg2-dev
-          apt-get install -y --no-install-recommends libsfdo-dev || echo "libsfdo-dev not available, meson wrap will be used"
+      - name: Setup (Raspberry Pi repo + build dependencies)
+        shell: bash -eo pipefail {0}
+        run: ./scripts/ci-setup.sh 2>&1 | tee -a build.log
 
       - name: Build and package
-        run: bash -o pipefail -c './scripts/build.sh 2>&1 | tee build.log'
+        shell: bash -eo pipefail {0}
+        run: ./scripts/build.sh 2>&1 | tee -a build.log
 
       - name: Publish build log to branch build-logs
         if: always()
