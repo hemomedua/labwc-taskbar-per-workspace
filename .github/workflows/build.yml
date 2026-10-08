@@ -1,0 +1,68 @@
+name: build-deb
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: debian:trixie
+    steps:
+      - name: Base tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates curl gnupg file
+
+      - uses: actions/checkout@v4
+
+      - name: Enable Raspberry Pi apt repository
+        run: |
+          curl -fsSL https://archive.raspberrypi.com/debian/raspberrypi.gpg.key \
+            | gpg --dearmor -o /usr/share/keyrings/raspberrypi-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/raspberrypi-archive-keyring.gpg] http://archive.raspberrypi.com/debian/ trixie main" \
+            > /etc/apt/sources.list.d/raspi.list
+          apt-get update
+
+      - name: Build dependencies
+        run: |
+          apt-get install -y --no-install-recommends \
+            build-essential meson ninja-build pkg-config gettext xwayland \
+            libwlroots-0.19-dev libwayland-dev wayland-protocols libxkbcommon-dev \
+            libxcb1-dev libxcb-ewmh-dev libxcb-icccm4-dev libdrm-dev libxml2-dev \
+            libglib2.0-dev libcairo2-dev libpango1.0-dev libinput-dev \
+            libpixman-1-dev libpng-dev librsvg2-dev
+          apt-get install -y --no-install-recommends libsfdo-dev || echo "libsfdo-dev not available, meson wrap will be used"
+
+      - name: Build and package
+        run: bash -o pipefail -c './scripts/build.sh 2>&1 | tee build.log'
+
+      - name: Publish build log to branch build-logs
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/logbranch && cp build.log /tmp/logbranch/ 2>/dev/null || echo "no log" > /tmp/logbranch/build.log
+          cd /tmp/logbranch
+          git init -q && git checkout -q -b build-logs
+          git config user.name ci && git config user.email ci@example.com
+          git add . && git commit -qm "build log run ${{ github.run_number }}"
+          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" build-logs
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: labwc-deb
+          path: out/*.deb
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: labwc 0.9.8 + taskbar per workspace (build ${{ github.run_number }})
+          files: out/*.deb

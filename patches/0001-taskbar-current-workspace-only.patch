@@ -1,0 +1,188 @@
+diff --git a/docs/labwc-config.5.scd b/docs/labwc-config.5.scd
+index 03d5fc2..8f82828 100644
+--- a/docs/labwc-config.5.scd
++++ b/docs/labwc-config.5.scd
+@@ -576,6 +576,13 @@ extending outward from the snapped edge.
+ 	defined in <names> or must be an index equal to or lower than <number>.
+ 	If not set, the first workspace is used.
+ 
++*<desktops><taskbarCurrentWorkspaceOnly>* [yes|no]
++	Only expose windows on the current workspace (and windows visible on
++	all workspaces) to panels and taskbars using the foreign-toplevel
++	protocols. Windows on other workspaces get their foreign-toplevel
++	handle destroyed and re-created when their workspace becomes active
++	again. Default is no.
++
+ *<desktops><popupTime>*
+ 	Define the timeout after which to hide the workspace OSD.
+ 	A setting of 0 disables the OSD. Default is 1000 ms.
+diff --git a/include/config/rcxml.h b/include/config/rcxml.h
+index a6f1a7d..61a3a79 100644
+--- a/include/config/rcxml.h
++++ b/include/config/rcxml.h
+@@ -175,6 +175,7 @@ struct rcxml {
+ 		int min_nr_workspaces;
+ 		char *initial_workspace_name;
+ 		char *prefix;
++		bool taskbar_current_only;
+ 		struct wl_list workspaces;  /* struct workspace_config.link */
+ 	} workspace_config;
+ 
+diff --git a/include/view-impl-common.h b/include/view-impl-common.h
+index 31513b5..8b3e6e6 100644
+--- a/include/view-impl-common.h
++++ b/include/view-impl-common.h
+@@ -13,6 +13,14 @@ struct view;
+ void view_impl_map(struct view *view);
+ void view_impl_unmap(struct view *view);
+ 
++/*
++ * Create or destroy the foreign-toplevel handle of a view depending on
++ * whether it should currently be shown in panels/taskbars. With
++ * <desktops><taskbarCurrentWorkspaceOnly> only views on the current
++ * workspace (or visible on all workspaces) have a handle.
++ */
++void view_update_foreign_toplevel(struct view *view);
++
+ /*
+  * Updates view geometry at commit based on current position/size,
+  * pending move/resize, and committed surface size. The computed
+diff --git a/src/config/rcxml.c b/src/config/rcxml.c
+index 4509378..31f88bc 100644
+--- a/src/config/rcxml.c
++++ b/src/config/rcxml.c
+@@ -1314,6 +1314,8 @@ entry(xmlNode *node, char *nodename, char *content)
+ 		struct workspace_config *conf = znew(*conf);
+ 		conf->name = xstrdup(content);
+ 		wl_list_append(&rc.workspace_config.workspaces, &conf->link);
++	} else if (!strcasecmp(nodename, "taskbarCurrentWorkspaceOnly.desktops")) {
++		set_bool(content, &rc.workspace_config.taskbar_current_only);
+ 	} else if (!strcasecmp(nodename, "popupTime.desktops")) {
+ 		rc.workspace_config.popuptime = atoi(content);
+ 	} else if (!strcasecmp(nodename, "initial.desktops")) {
+diff --git a/src/view-impl-common.c b/src/view-impl-common.c
+index 23f3732..d9a1412 100644
+--- a/src/view-impl-common.c
++++ b/src/view-impl-common.c
+@@ -2,10 +2,42 @@
+ /* view-impl-common.c: common code for shell view->impl functions */
+ #include "view-impl-common.h"
+ #include "foreign-toplevel/foreign.h"
++#include "config/rcxml.h"
+ #include "labwc.h"
+ #include "view.h"
+ #include "window-rules.h"
+ 
++void
++view_update_foreign_toplevel(struct view *view)
++{
++	/*
++	 * Respect skipTaskbar rules and exclude unfocusable views (popups,
++	 * floating toolbars, etc.) as these should not be shown in
++	 * taskbars/docks/etc.
++	 */
++	bool want = view_is_focusable(view)
++		&& window_rules_get_property(view, "skipTaskbar")
++			!= LAB_PROP_TRUE;
++
++	if (want && rc.workspace_config.taskbar_current_only) {
++		want = view->visible_on_all_workspaces
++			|| view->workspace == view->server->workspaces.current;
++	}
++
++	if (want && !view->foreign_toplevel) {
++		view->foreign_toplevel = foreign_toplevel_create(view);
++
++		struct view *parent = view->impl->get_parent(view);
++		if (parent && parent->foreign_toplevel) {
++			foreign_toplevel_set_parent(view->foreign_toplevel,
++				parent->foreign_toplevel);
++		}
++	} else if (!want && view->foreign_toplevel) {
++		foreign_toplevel_destroy(view->foreign_toplevel);
++		view->foreign_toplevel = NULL;
++	}
++}
++
+ void
+ view_impl_map(struct view *view)
+ {
+@@ -20,22 +52,7 @@ view_impl_map(struct view *view)
+ 		window_rules_apply(view, LAB_WINDOW_RULE_EVENT_ON_FIRST_MAP);
+ 	}
+ 
+-	/*
+-	 * Create foreign-toplevel handle, respecting skipTaskbar rules.
+-	 * Also exclude unfocusable views (popups, floating toolbars,
+-	 * etc.) as these should not be shown in taskbars/docks/etc.
+-	 */
+-	if (!view->foreign_toplevel && view_is_focusable(view)
+-			&& window_rules_get_property(view, "skipTaskbar")
+-				!= LAB_PROP_TRUE) {
+-		view->foreign_toplevel = foreign_toplevel_create(view);
+-
+-		struct view *parent = view->impl->get_parent(view);
+-		if (parent && parent->foreign_toplevel) {
+-			foreign_toplevel_set_parent(view->foreign_toplevel,
+-				parent->foreign_toplevel);
+-		}
+-	}
++	view_update_foreign_toplevel(view);
+ 
+ 	wlr_log(WLR_DEBUG, "[map] identifier=%s, title=%s",
+ 		view->app_id, view->title);
+diff --git a/src/view.c b/src/view.c
+index 9cc246e..5071ef2 100644
+--- a/src/view.c
++++ b/src/view.c
+@@ -30,6 +30,7 @@
+ #include "snap.h"
+ #include "ssd.h"
+ #include "theme.h"
++#include "view-impl-common.h"
+ #include "window-rules.h"
+ #include "wlr/util/log.h"
+ #include "workspaces.h"
+@@ -1575,6 +1576,7 @@ view_toggle_visible_on_all_workspaces(struct view *view)
+ 	assert(view);
+ 	view->visible_on_all_workspaces = !view->visible_on_all_workspaces;
+ 	ssd_update_geometry(view->ssd);
++	view_update_foreign_toplevel(view);
+ }
+ 
+ void
+@@ -1586,6 +1588,7 @@ view_move_to_workspace(struct view *view, struct workspace *workspace)
+ 		view->workspace = workspace;
+ 		wlr_scene_node_reparent(&view->scene_tree->node,
+ 			workspace->view_trees[view->layer]);
++		view_update_foreign_toplevel(view);
+ 	}
+ }
+ 
+diff --git a/src/workspaces.c b/src/workspaces.c
+index 95e1fb2..eb78016 100644
+--- a/src/workspaces.c
++++ b/src/workspaces.c
+@@ -23,6 +23,7 @@
+ #include "protocols/ext-workspace.h"
+ #include "theme.h"
+ #include "view.h"
++#include "view-impl-common.h"
+ 
+ #define COSMIC_WORKSPACES_VERSION 1
+ #define EXT_WORKSPACES_VERSION 1
+@@ -490,6 +491,14 @@ workspaces_switch_to(struct workspace *target, bool update_focus)
+ 	/* Make sure new views will spawn on the new workspace */
+ 	server->workspaces.current = target;
+ 
++	/* Update which views are shown in panels/taskbars */
++	if (rc.workspace_config.taskbar_current_only) {
++		struct view *tview;
++		wl_list_for_each(tview, &server->views, link) {
++			view_update_foreign_toplevel(tview);
++		}
++	}
++
+ 	struct view *grabbed_view = server->grabbed_view;
+ 	if (grabbed_view) {
+ 		view_move_to_workspace(grabbed_view, target);
