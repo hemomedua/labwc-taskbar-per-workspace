@@ -104,8 +104,8 @@ index 0c87f44..20a4529 100644
 + * Prefix menu items that toggle a view state (always on top, omnipresent,
 + * shade, ...) with a checked/unchecked box so the current state is visible.
 + */
-+#define TOGGLE_ON "\xe2\x98\x91 "   /* U+2611 BALLOT BOX WITH CHECK */
-+#define TOGGLE_OFF "\xe2\x98\x90 "  /* U+2610 BALLOT BOX */
++#define TOGGLE_ON "\xe2\x9c\x85 "   /* U+2705 WHITE HEAVY CHECK MARK */
++#define TOGGLE_OFF "\xe2\xac\x9c "  /* U+2B1C WHITE LARGE SQUARE */
 +#define TOGGLE_PREFIX_LEN 4 /* 3 byte UTF-8 character + space */
 +
 +static void
