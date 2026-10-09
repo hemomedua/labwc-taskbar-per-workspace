@@ -24,7 +24,7 @@ ldd "$WORK/pkgroot/usr/bin/labwc" | grep -i 'not found' && exit 1 || true
 
 # --- .deb that diverts /usr/bin/labwc (original is kept as labwc.distrib)
 PKG=labwc-taskbar-workspace
-VER=0.9.8+ws1
+VER=0.9.8+ws2
 D=$WORK/deb
 rm -rf "$D" && mkdir -p "$D/DEBIAN" "$D/usr/bin"
 install -m755 "$WORK/pkgroot/usr/bin/labwc" "$D/usr/bin/labwc"
@@ -37,7 +37,7 @@ Maintainer: hemomedua <noreply@users.noreply.github.com>
 Depends: labwc (>= 0.9.8), libwlroots-0.19
 Section: x11
 Priority: optional
-Description: labwc 0.9.8 with per-workspace taskbar filtering
+Description: labwc 0.9.8 with per-workspace taskbar filtering and menu toggle state
  Adds the option <desktops><taskbarCurrentWorkspaceOnly>yes</...> so that
  panels and taskbars only see windows on the current workspace.
  The original /usr/bin/labwc is diverted to /usr/bin/labwc.distrib.

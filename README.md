@@ -16,7 +16,11 @@ labwc keeps the foreign-toplevel handle of a window only while the window is on 
 active workspace (or is visible on all workspaces). On workspace switch / window move
 the handles are destroyed and re-created. The option is off by default.
 
-* `patches/0001-taskbar-current-workspace-only.patch` – the patch (GPL-2.0-only, like labwc)
+* `patches/0001-taskbar-current-workspace-only.patch` – per-workspace taskbar (GPL-2.0-only, like labwc)
+* `patches/0002-menu-show-toggle-state.patch` – optional `<menu><showToggleState>yes</showToggleState></menu>`:
+  menu items for ToggleAlwaysOnTop / ToggleAlwaysOnBottom / ToggleOmnipresent / ToggleShade show a
+  checked/unchecked box for the window the menu was opened for
+* `examples/raspi-setup.sh` – example setup (two workspaces, panel buttons, window menu) for xfce4-panel on Raspberry Pi OS
 * `scripts/build.sh` – builds labwc 0.9.8 + patch for Debian trixie arm64 and makes a `.deb`
 * `.github/workflows/build.yml` – runs the build on GitHub Actions (arm64), publishes the `.deb` as a release
 

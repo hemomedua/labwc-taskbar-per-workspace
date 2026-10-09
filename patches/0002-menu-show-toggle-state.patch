@@ -1,0 +1,183 @@
+diff --git a/docs/labwc-config.5.scd b/docs/labwc-config.5.scd
+index 8f82828..ee27757 100644
+--- a/docs/labwc-config.5.scd
++++ b/docs/labwc-config.5.scd
+@@ -1408,6 +1408,12 @@ situation.
+ 	Default is yes. Requires libsfdo. If labwc is built without it, no
+ 	icons will be shown.
+ 
++*<menu><showToggleState>* [yes|no]
++	Prefix menu items that toggle a window state (ToggleAlwaysOnTop,
++	ToggleAlwaysOnBottom, ToggleOmnipresent, ToggleShade) with a checked
++	or unchecked box to show the current state of the window the menu was
++	opened for. Default is no.
++
+ ## MAGNIFIER
+ 
+ ```
+diff --git a/include/action.h b/include/action.h
+index 7692e38..150e334 100644
+--- a/include/action.h
++++ b/include/action.h
+@@ -28,6 +28,14 @@ const char *action_get_str(struct action *action, const char *key,
+ bool action_is_valid(struct action *action);
+ bool action_is_show_menu(struct action *action);
+ 
++/*
++ * If the action toggles a boolean state of a view (always-on-top,
++ * always-on-bottom, omnipresent, shade), store the current state in
++ * @state and return true. Used to show the state in menus.
++ */
++bool action_get_toggle_state(struct action *action, struct view *view,
++	bool *state);
++
+ void action_arg_add_str(struct action *action, const char *key, const char *value);
+ void action_arg_add_actionlist(struct action *action, const char *key);
+ void action_arg_add_querylist(struct action *action, const char *key);
+diff --git a/include/config/rcxml.h b/include/config/rcxml.h
+index 61a3a79..55047a2 100644
+--- a/include/config/rcxml.h
++++ b/include/config/rcxml.h
+@@ -203,6 +203,7 @@ struct rcxml {
+ 	/* Menu */
+ 	unsigned int menu_ignore_button_release_period;
+ 	bool menu_show_icons;
++	bool menu_show_toggle_state;
+ 
+ 	/* Magnifier */
+ 	int mag_width;
+diff --git a/src/action.c b/src/action.c
+index 2f956d9..0215fa9 100644
+--- a/src/action.c
++++ b/src/action.c
+@@ -696,6 +696,28 @@ action_is_valid(struct action *action)
+ 	return false;
+ }
+ 
++bool
++action_get_toggle_state(struct action *action, struct view *view, bool *state)
++{
++	assert(action && view && state);
++	switch (action->type) {
++	case ACTION_TYPE_TOGGLE_ALWAYS_ON_TOP:
++		*state = view->layer == VIEW_LAYER_ALWAYS_ON_TOP;
++		return true;
++	case ACTION_TYPE_TOGGLE_ALWAYS_ON_BOTTOM:
++		*state = view->layer == VIEW_LAYER_ALWAYS_ON_BOTTOM;
++		return true;
++	case ACTION_TYPE_TOGGLE_OMNIPRESENT:
++		*state = view->visible_on_all_workspaces;
++		return true;
++	case ACTION_TYPE_TOGGLE_SHADE:
++		*state = view->shaded;
++		return true;
++	default:
++		return false;
++	}
++}
++
+ bool
+ action_is_show_menu(struct action *action)
+ {
+diff --git a/src/config/rcxml.c b/src/config/rcxml.c
+index 31f88bc..65a1120 100644
+--- a/src/config/rcxml.c
++++ b/src/config/rcxml.c
+@@ -1361,6 +1361,8 @@ entry(xmlNode *node, char *nodename, char *content)
+ 		rc.menu_ignore_button_release_period = atoi(content);
+ 	} else if (!strcasecmp(nodename, "showIcons.menu")) {
+ 		set_bool(content, &rc.menu_show_icons);
++	} else if (!strcasecmp(nodename, "showToggleState.menu")) {
++		set_bool(content, &rc.menu_show_toggle_state);
+ 	} else if (!strcasecmp(nodename, "width.magnifier")) {
+ 		rc.mag_width = atoi(content);
+ 	} else if (!strcasecmp(nodename, "height.magnifier")) {
+diff --git a/src/menu/menu.c b/src/menu/menu.c
+index 0c87f44..20a4529 100644
+--- a/src/menu/menu.c
++++ b/src/menu/menu.c
+@@ -464,6 +464,73 @@ menu_create_scene(struct menu *menu)
+ 	wlr_scene_node_lower_to_bottom(&bg_rect->tree->node);
+ }
+ 
++/*
++ * Prefix menu items that toggle a view state (always on top, omnipresent,
++ * shade, ...) with a checked/unchecked box so the current state is visible.
++ */
++#define TOGGLE_ON "\xe2\x98\x91 "   /* U+2611 BALLOT BOX WITH CHECK */
++#define TOGGLE_OFF "\xe2\x98\x90 "  /* U+2610 BALLOT BOX */
++#define TOGGLE_PREFIX_LEN 4 /* 3 byte UTF-8 character + space */
++
++static void
++menu_recreate_scene(struct menu *menu)
++{
++	struct menuitem *item;
++	wl_list_for_each(item, &menu->menuitems, link) {
++		/* The item trees are destroyed together with the menu tree */
++		item->tree = NULL;
++		item->normal_tree = NULL;
++		item->selected_tree = NULL;
++	}
++	wlr_scene_node_destroy(&menu->scene_tree->node);
++	menu->scene_tree = NULL;
++	menu_create_scene(menu);
++}
++
++static void
++update_toggle_state_labels(struct menu *menu)
++{
++	struct view *view = menu->triggered_by_view;
++	if (!view) {
++		return;
++	}
++
++	bool changed = false;
++	struct menuitem *item;
++	wl_list_for_each(item, &menu->menuitems, link) {
++		if (item->type != LAB_MENU_ITEM || wl_list_empty(&item->actions)) {
++			continue;
++		}
++		struct action *action;
++		wl_list_for_each(action, &item->actions, link) {
++			break;
++		}
++		bool state;
++		if (!action_get_toggle_state(action, view, &state)) {
++			continue;
++		}
++
++		const char *base = item->text;
++		if (!strncmp(base, TOGGLE_ON, TOGGLE_PREFIX_LEN)
++				|| !strncmp(base, TOGGLE_OFF, TOGGLE_PREFIX_LEN)) {
++			base += TOGGLE_PREFIX_LEN;
++		}
++		struct buf buf = BUF_INIT;
++		buf_add(&buf, state ? TOGGLE_ON : TOGGLE_OFF);
++		buf_add(&buf, base);
++		free(item->text);
++		item->text = xstrdup(buf.data);
++		buf_reset(&buf);
++
++		item->native_width = font_width(&rc.font_menuitem, item->text);
++		changed = true;
++	}
++
++	if (changed && menu->scene_tree) {
++		menu_recreate_scene(menu);
++	}
++}
++
+ /*
+  * Handle the following:
+  * <item label="">
+@@ -1168,6 +1235,10 @@ open_menu(struct menu *menu, struct wlr_box anchor_rect)
+ 		update_client_send_to_menu(menu->server);
+ 	}
+ 
++	if (rc.menu_show_toggle_state) {
++		update_toggle_state_labels(menu);
++	}
++
+ 	if (!menu->scene_tree) {
+ 		menu_create_scene(menu);
+ 		assert(menu->scene_tree);

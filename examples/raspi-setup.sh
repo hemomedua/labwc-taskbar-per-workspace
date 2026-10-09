@@ -86,8 +86,49 @@ cat > "$HOME/.config/labwc/rc.xml" <<EOF
 <mouse>
   <default />
 </mouse>
+<menu>
+  <showToggleState>yes</showToggleState>
+</menu>
 </openbox_config>
 EOF
+
+# window menu (client-menu): Alt+Space or right click on the title bar
+cat > "$HOME/.config/labwc/menu.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_menu>
+<menu id="client-menu">
+  <item label="Послать в другой стол">
+    <action name="SendToDesktop">
+      <to>right</to>
+      <wrap>yes</wrap>
+      <follow>no</follow>
+    </action>
+  </item>
+  <item label="Свернуть в заголовок">
+    <action name="ToggleShade" />
+  </item>
+  <item label="Поверх всех">
+    <action name="ToggleAlwaysOnTop" />
+  </item>
+  <item label="Показать везде">
+    <action name="ToggleOmnipresent" />
+  </item>
+  <separator />
+  <item label="Свернуть">
+    <action name="Iconify" />
+  </item>
+  <item label="Развернуть / вернуть">
+    <action name="ToggleMaximize" />
+  </item>
+  <item label="Закрыть">
+    <action name="Close" />
+  </item>
+</menu>
+</openbox_menu>
+EOF
+touch "$HOME/.config/labwc/themerc-override"
+sed -i '/^menu\.width\.\(min\|max\):/d' "$HOME/.config/labwc/themerc-override"
+printf '\nmenu.width.min: 260\nmenu.width.max: 420\n' >> "$HOME/.config/labwc/themerc-override"
 
 # xfce4-panel: genmon 30 (workspace button) and launcher 32 (window menu button)
 cat > "$HOME/.config/xfce4/panel/genmon-30.rc" <<EOF
