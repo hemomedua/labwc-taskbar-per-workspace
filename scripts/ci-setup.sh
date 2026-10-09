@@ -2,10 +2,9 @@
 # Prepares a debian:trixie container: Raspberry Pi apt repo + build dependencies.
 set -euxo pipefail
 
-curl -fsSL -o /tmp/raspberrypi.gpg.key https://archive.raspberrypi.com/debian/raspberrypi.gpg.key
-file /tmp/raspberrypi.gpg.key
-gpg --dearmor < /tmp/raspberrypi.gpg.key > /usr/share/keyrings/raspberrypi-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/raspberrypi-archive-keyring.gpg] http://archive.raspberrypi.com/debian/ trixie main" \
+# The Raspberry Pi archive key uses a SHA1 binding signature, which apt's sqv policy
+# rejects since 2026-02-01, so the repo is marked trusted for this throw-away CI container.
+echo "deb [trusted=yes] https://archive.raspberrypi.com/debian/ trixie main" \
 	> /etc/apt/sources.list.d/raspi.list
 apt-get update
 
