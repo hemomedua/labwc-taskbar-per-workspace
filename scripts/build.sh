@@ -8,10 +8,20 @@ SRC=$WORK/labwc
 OUT=${OUT:-$PWD/out}
 mkdir -p "$WORK" "$OUT"
 
-git clone --depth 1 --branch 0.9.8 https://github.com/labwc/labwc "$SRC"
+HERE=$(cd "$(dirname "$0")" && pwd)
+PATCHES=$HERE/patches
+[ -d "$PATCHES" ] || PATCHES=$HERE/../patches
+
+if [ -n "${LABWC_SRC_TARBALL:-}" ]; then
+	# offline: upstream labwc 0.9.8 source from the bundle
+	mkdir -p "$WORK" && tar xzf "$LABWC_SRC_TARBALL" -C "$WORK"
+	rm -rf "$SRC" && mv "$WORK/labwc-0.9.8" "$SRC"
+else
+	git clone --depth 1 --branch 0.9.8 https://github.com/labwc/labwc "$SRC"
+fi
 cd "$SRC"
-for p in "$OLDPWD"/patches/*.patch; do
-	git apply --verbose "$p"
+for p in "$PATCHES"/*.patch; do
+	git apply --verbose "$p" 2>/dev/null || patch -p1 < "$p"
 done
 
 meson setup build --prefix=/usr --buildtype=release \

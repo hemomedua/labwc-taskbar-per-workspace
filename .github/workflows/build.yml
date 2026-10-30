@@ -29,6 +29,10 @@ jobs:
         shell: bash -eo pipefail {0}
         run: ./scripts/build.sh 2>&1 | tee -a build.log
 
+      - name: Offline bundle
+        shell: bash -eo pipefail {0}
+        run: ./scripts/make-bundle.sh 2>&1 | tee -a build.log
+
       - name: Publish build log to branch build-logs
         if: always()
         env:
@@ -45,11 +49,15 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: labwc-deb
-          path: out/*.deb
+          path: |
+            out/*.deb
+            out/*.tar.gz
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
           name: labwc 0.9.8 + taskbar per workspace (build ${{ github.run_number }})
-          files: out/*.deb
+          files: |
+            out/*.deb
+            out/*.tar.gz

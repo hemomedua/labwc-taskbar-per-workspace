@@ -10,15 +10,18 @@
 # In both modes an xfce4-panel gets a workspace button (SVG icon 1/2, click = switch) and a
 # "window menu" button.
 #
-# Usage:  bash install.sh [--mode labwc|xfwm4] [--config-only] [--no-panel] [--keep-pager] [--uninstall]
+# Usage:  bash install.sh [--mode labwc|xfwm4] [--offline] [--config-only] [--no-panel] [--keep-pager] [--uninstall]
+#   --offline       never use the network: install only from the files/ folder next to this script
 #   --config-only   do not install packages, only (re)write the configuration
 #   --no-panel      do not touch the xfce4-panel configuration
 #   --keep-pager    keep the xfce4 "pager" plugin on the panel (removed by default)
 #   --uninstall     remove everything this script installed and restore the backups
 #
+# If a files/ folder (the offline bundle) is next to this script, it is used instead of the network.
 # Safe to run several times. Backups of the first state are kept as *.orig-ws.
 set -euo pipefail
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)
 REPO="hemomedua/labwc-taskbar-per-workspace"
 PKG="labwc-taskbar-workspace"
 CONF="$HOME/.config/labwc"
@@ -32,15 +35,16 @@ if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "$XDG_RUNTIME_DIR/bus" ]; then
 fi
 if [ -z "${DISPLAY:-}" ] && [ -S /tmp/.X11-unix/X0 ]; then export DISPLAY=:0; fi
 
-MODE=auto; CONFIG_ONLY=0; NO_PANEL=0; KEEP_PAGER=0; UNINSTALL=0
+OFFLINE=0; MODE=auto; CONFIG_ONLY=0; NO_PANEL=0; KEEP_PAGER=0; UNINSTALL=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--mode) shift; MODE="${1:-}"; case "$MODE" in labwc|xfwm4) ;; *) echo "--mode needs labwc or xfwm4" >&2; exit 2 ;; esac ;;
+	--offline) OFFLINE=1 ;;
 	--config-only) CONFIG_ONLY=1 ;;
 	--no-panel) NO_PANEL=1 ;;
 	--keep-pager) KEEP_PAGER=1 ;;
 	--uninstall) UNINSTALL=1 ;;
-	-h|--help) sed -n 2,22p "$0"; exit 0 ;;
+	-h|--help) sed -n 2,26p "$0"; exit 0 ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 	shift
@@ -189,28 +193,63 @@ else
 fi
 
 # ---------------------------------------------------------------- packages
-if [ "$CONFIG_ONLY" = 0 ]; then
-	if [ "$MODE" = labwc ]; then
-		log "Installing packages (wtype, xfce4-genmon-plugin, python3, curl)"
-		sudo apt-get install -y --no-install-recommends wtype xfce4-genmon-plugin python3 curl ca-certificates
+# apt_install PKG...: install from the distribution (apt); if that is impossible (no network,
+# --offline) fall back to the matching .deb files of the offline bundle (files/deps/).
+apt_install() {
+	if [ "$OFFLINE" = 0 ] && sudo apt-get install -y --no-install-recommends "$@"; then return 0; fi
+	local pkg f list=()
+	for pkg in "$@"; do
+		for f in "$SCRIPT_DIR/files/deps/${pkg}_"*.deb; do [ -e "$f" ] && list+=("$f"); done
+		if [ "$pkg" = xdotool ]; then
+			for f in "$SCRIPT_DIR/files/deps/libxdo3_"*.deb; do [ -e "$f" ] && list+=("$f"); done
+		fi
+	done
+	[ "${#list[@]}" -gt 0 ] || die "cannot install: $* (no network and no bundled .deb files for them)"
+	echo "Installing from the bundled files: ${list[*]##*/}"
+	sudo apt-get install -y --no-install-recommends "${list[@]}" \
+		|| die "installing the bundled packages failed (they are built for Debian trixie arm64 and need their dependencies installed)"
+}
 
-		log "Downloading the patched labwc"
+verify_bundle() {
+	if [ -f "$SCRIPT_DIR/SHA256SUMS" ]; then
+		log "Verifying the bundled files"
+		(cd "$SCRIPT_DIR" && sha256sum -c --quiet SHA256SUMS) || die "checksum mismatch: the bundle is damaged or was modified"
+		echo "OK"
+	fi
+}
+
+if [ "$CONFIG_ONLY" = 0 ]; then
+	verify_bundle
+	if [ "$MODE" = labwc ]; then
+		log "Installing packages (wtype, xfce4-genmon-plugin)"
+		apt_install wtype xfce4-genmon-plugin
+		command -v python3 >/dev/null || apt_install python3
+
+		LOCAL_DEB=$(ls "$SCRIPT_DIR"/files/*_arm64.deb 2>/dev/null | head -1 || true)
 		tmp=$(mktemp -d); chmod 755 "$tmp"
-		url=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | python3 -c '
+		if [ -n "$LOCAL_DEB" ]; then
+			log "Using the bundled patched labwc: ${LOCAL_DEB##*/}"
+			cp "$LOCAL_DEB" "$tmp/$PKG.deb"
+		else
+			[ "$OFFLINE" = 0 ] || die "--offline needs the files/ folder of the offline bundle next to install.sh"
+			log "Downloading the patched labwc"
+			command -v curl >/dev/null || apt_install curl ca-certificates
+			url=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | python3 -c '
 import json, sys
 for a in json.load(sys.stdin).get("assets", []):
     if a["name"].endswith("_arm64.deb"):
         print(a["browser_download_url"]); break')
-		[ -n "$url" ] || die "no .deb found in the latest release of $REPO"
-		echo "$url"
-		curl -fsSL -o "$tmp/$PKG.deb" "$url"
+			[ -n "$url" ] || die "no .deb found in the latest release of $REPO"
+			echo "$url"
+			curl -fsSL -o "$tmp/$PKG.deb" "$url"
+		fi
 		chmod 644 "$tmp/$PKG.deb"
 		sudo apt-get install -y "$tmp/$PKG.deb"
 		sudo apt-mark hold labwc
 		rm -rf "$tmp"
 	else
 		log "Installing packages (xdotool, xfce4-genmon-plugin)"
-		sudo apt-get install -y --no-install-recommends xdotool xfce4-genmon-plugin
+		apt_install xdotool xfce4-genmon-plugin
 	fi
 elif [ "$MODE" = labwc ]; then
 	command -v python3 >/dev/null || die "python3 is required"
