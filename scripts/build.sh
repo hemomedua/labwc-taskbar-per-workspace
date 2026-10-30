@@ -34,7 +34,7 @@ ldd "$WORK/pkgroot/usr/bin/labwc" | grep -i 'not found' && exit 1 || true
 
 # --- .deb that diverts /usr/bin/labwc (original is kept as labwc.distrib)
 PKG=labwc-taskbar-workspace
-VER=0.9.8+ws3
+VER=0.9.8+ws4
 D=$WORK/deb
 rm -rf "$D" && mkdir -p "$D/DEBIAN" "$D/usr/bin"
 install -m755 "$WORK/pkgroot/usr/bin/labwc" "$D/usr/bin/labwc"

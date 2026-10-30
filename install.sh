@@ -10,12 +10,13 @@
 # In both modes an xfce4-panel gets a workspace button (SVG icon 1/2, click = switch) and a
 # "window menu" button.
 #
-# Usage:  bash install.sh [--mode labwc|xfwm4] [--offline] [--config-only] [--no-panel] [--keep-pager] [--uninstall]
+# Usage:  bash install.sh [--mode labwc|xfwm4] [--offline] [--config-only] [--no-panel] [--keep-pager] [--uninstall] [--status]
 #   --offline       never use the network: install only from the files/ folder next to this script
 #   --config-only   do not install packages, only (re)write the configuration
 #   --no-panel      do not touch the xfce4-panel configuration
 #   --keep-pager    keep the xfce4 "pager" plugin on the panel (removed by default)
 #   --uninstall     remove everything this script installed and restore the backups
+#   --status        print what is installed / configured (read-only, good for bug reports)
 #
 # If a files/ folder (the offline bundle) is next to this script, it is used instead of the network.
 # Safe to run several times. Backups of the first state are kept as *.orig-ws.
@@ -35,7 +36,7 @@ if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "$XDG_RUNTIME_DIR/bus" ]; then
 fi
 if [ -z "${DISPLAY:-}" ] && [ -S /tmp/.X11-unix/X0 ]; then export DISPLAY=:0; fi
 
-OFFLINE=0; MODE=auto; CONFIG_ONLY=0; NO_PANEL=0; KEEP_PAGER=0; UNINSTALL=0
+STATUS=0; OFFLINE=0; MODE=auto; CONFIG_ONLY=0; NO_PANEL=0; KEEP_PAGER=0; UNINSTALL=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--mode) shift; MODE="${1:-}"; case "$MODE" in labwc|xfwm4) ;; *) echo "--mode needs labwc or xfwm4" >&2; exit 2 ;; esac ;;
@@ -44,7 +45,8 @@ while [ $# -gt 0 ]; do
 	--no-panel) NO_PANEL=1 ;;
 	--keep-pager) KEEP_PAGER=1 ;;
 	--uninstall) UNINSTALL=1 ;;
-	-h|--help) sed -n 2,26p "$0"; exit 0 ;;
+	--status) STATUS=1 ;;
+	-h|--help) sed -n 2,27p "$0"; exit 0 ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 	shift
@@ -64,7 +66,7 @@ backup_once() {
 }
 
 # ---------------------------------------------------------------- panel helpers
-XQ() { xfconf-query -c xfce4-panel "$@"; }
+XQ() { timeout 15 xfconf-query -c xfce4-panel "$@"; }
 
 panel_numbers() { XQ -p /panels 2>/dev/null | grep -E '^[0-9]+$' || true; }
 panel_ids()     { XQ -p "/panels/panel-$1/plugin-ids" 2>/dev/null | grep -E '^[0-9]+$' || true; }
@@ -133,11 +135,72 @@ detect_mode() {
 	else die "could not detect labwc or xfwm4; use --mode labwc or --mode xfwm4"; fi
 }
 
+# ---------------------------------------------------------------- status (read-only)
+if [ "$STATUS" = 1 ]; then
+	set +e +u
+	echo "== system"
+	( . /etc/os-release; echo "${PRETTY_NAME:-unknown} / $(uname -m)" )
+	echo "detected mode: $( (detect_mode; echo "$MODE") 2>/dev/null || echo unknown )"
+	echo "== labwc package"
+	dpkg-query -W -f='labwc ${Version}\n' labwc 2>/dev/null || echo "labwc: not installed"
+	dpkg-query -W -f="$PKG "'${Version}\n' "$PKG" 2>/dev/null || echo "$PKG: not installed"
+	echo "held packages: $(apt-mark showhold 2>/dev/null | tr '\n' ' ')"
+	echo "diversions: $(dpkg-divert --list /usr/bin/labwc 2>/dev/null || true)"
+	echo "running labwc: $(readlink "/proc/$(pgrep -x labwc | head -1)/exe" 2>/dev/null || echo "not running")"
+	ls -la /usr/bin/labwc /usr/bin/labwc.distrib 2>&1 | sed 's/^/  /'
+	echo "== files"
+	for f in "$CONF"/rc.xml "$CONF"/menu.xml "$CONF"/autostart "$CONF"/themerc-override \
+		"$CONF"/*.orig-ws "$CONF"/*.created-by-ws "$BIN"/ws-*.sh "$ICONS"/ws-*.svg "$STATE"/*; do
+		[ -e "$f" ] && echo "  $f"
+	done
+	echo "== xfce4-panel"
+	if command -v xfconf-query >/dev/null && [ -n "$(pick_panel)" ]; then
+		echo "genmon id: $(find_genmon_id || true)   launcher id: $(find_launcher_id || true)"
+		for p in $(panel_numbers); do echo "panel-$p: $(panel_ids "$p" | tr '\n' ' ')"; done
+	else
+		echo "(no xfce4-panel configuration reachable from this shell)"
+	fi
+	echo "== xfwm4 workspaces: $(xfconf-query -c xfwm4 -p /general/workspace_count 2>/dev/null || echo n/a)"
+	exit 0
+fi
+
 # ---------------------------------------------------------------- uninstall
+# Best effort: every step is independent, a failing step never stops the following ones.
 if [ "$UNINSTALL" = 1 ]; then
 	log "Uninstalling"
+	set +e +u
+
+	echo "-- 1/5 patched labwc package (restores the stock /usr/bin/labwc)"
+	sudo apt-mark unhold labwc
+	if dpkg -s "$PKG" >/dev/null 2>&1; then
+		sudo apt-get remove -y "$PKG" || sudo dpkg -r "$PKG"
+	fi
+	if dpkg-divert --list /usr/bin/labwc 2>/dev/null | grep -q "$PKG"; then
+		sudo dpkg-divert --package "$PKG" --remove --rename /usr/bin/labwc
+	fi
+	if [ ! -x /usr/bin/labwc ] && [ -x /usr/bin/labwc.distrib ]; then sudo mv /usr/bin/labwc.distrib /usr/bin/labwc; fi
+	[ -x /usr/bin/labwc ] || warn "/usr/bin/labwc is missing: run  sudo apt-get install --reinstall labwc"
+
+	echo "-- 2/5 configuration files"
+	for f in rc.xml menu.xml autostart themerc-override; do
+		if [ -e "$CONF/$f.orig-ws" ]; then mv -f "$CONF/$f.orig-ws" "$CONF/$f"; echo "restored $f"
+		elif [ -e "$CONF/$f.created-by-ws" ]; then rm -f "$CONF/$f" "$CONF/$f.created-by-ws"; echo "removed $f (it was created by the installer)"; fi
+	done
+
+	echo "-- 3/5 scripts and icons"
+	g=$(find_genmon_id); l=$(find_launcher_id)
+	rm -f "$BIN"/ws-set.sh "$BIN"/ws-click.sh "$BIN"/ws-genmon.sh "$BIN"/ws-move-click.sh \
+		"$ICONS"/ws-1.svg "$ICONS"/ws-2.svg "$ICONS"/ws-move.svg "$XDG_RUNTIME_DIR/ws-current"
+
+	echo "-- 4/5 xfwm4 workspace count"
+	if [ -e "$STATE/xfwm4-workspace-count.orig" ] && command -v xfconf-query >/dev/null; then
+		orig=$(cat "$STATE/xfwm4-workspace-count.orig")
+		if [ "$orig" = unset ]; then timeout 15 xfconf-query -c xfwm4 -p /general/workspace_count -r
+		else timeout 15 xfconf-query -c xfwm4 -p /general/workspace_count -n -t int -s "$orig"; fi
+	fi
+
+	echo "-- 5/5 panel buttons"
 	if command -v xfconf-query >/dev/null; then
-		g=$(find_genmon_id || true); l=$(find_launcher_id || true)
 		for p in $(panel_numbers); do
 			ids=$(panel_ids "$p")
 			echo "$ids" | grep -qxE "${g:-x}|${l:-x}" || continue
@@ -147,27 +210,16 @@ if [ "$UNINSTALL" = 1 ]; then
 			done
 			XQ -p "/panels/panel-$p/plugin-ids" "${args[@]}"
 		done
-		for id in $g $l; do XQ -p "/plugins/plugin-$id" -r -R 2>/dev/null || true; done
-		[ -z "$g" ] || rm -f "$PANEL_DIR/genmon-$g.rc"
-		[ -z "$l" ] || rm -rf "$PANEL_DIR/launcher-$l"
-		if [ -e "$STATE/xfwm4-workspace-count.orig" ]; then
-			orig=$(cat "$STATE/xfwm4-workspace-count.orig")
-			if [ "$orig" = unset ]; then xfconf-query -c xfwm4 -p /general/workspace_count -r 2>/dev/null || true
-			else xfconf-query -c xfwm4 -p /general/workspace_count -n -t int -s "$orig" 2>/dev/null || true; fi
-		fi
+		for id in $g $l; do XQ -p "/plugins/plugin-$id" -r -R; done
 	fi
-	for f in rc.xml menu.xml autostart themerc-override; do
-		if [ -e "$CONF/$f.orig-ws" ]; then mv -f "$CONF/$f.orig-ws" "$CONF/$f"
-		elif [ -e "$CONF/$f.created-by-ws" ]; then rm -f "$CONF/$f" "$CONF/$f.created-by-ws"; fi
-	done
-	rm -f "$BIN"/ws-set.sh "$BIN"/ws-click.sh "$BIN"/ws-genmon.sh "$BIN"/ws-move-click.sh \
-		"$ICONS"/ws-1.svg "$ICONS"/ws-2.svg "$ICONS"/ws-move.svg "$XDG_RUNTIME_DIR/ws-current"
+	[ -z "$g" ] || rm -f "$PANEL_DIR/genmon-$g.rc"
+	[ -z "$l" ] || rm -rf "$PANEL_DIR/launcher-$l"
+	pgrep -x xfce4-panel >/dev/null && xfce4-panel -r
 	rm -rf "$STATE"
-	if dpkg -s "$PKG" >/dev/null 2>&1; then
-		sudo apt-mark unhold labwc || true
-		sudo apt-get remove -y "$PKG" || true
-	fi
-	log "Done. Log out and in (or reboot). The pager plugin, if it was removed from the panel, is not restored."
+
+	log "Done. Log out and in (or reboot) to go back to the stock setup."
+	echo "The xfce4 pager plugin, if it was removed from the panel, is not restored automatically."
+	echo "Check the result with:  bash install.sh --status"
 	exit 0
 fi
 
@@ -485,6 +537,7 @@ fi
 if [ "$MODE" = xfwm4 ]; then
 	log "Configuring xfwm4 (two workspaces)"
 	command -v xfconf-query >/dev/null || die "xfconf-query not found"
+	backup_once "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml"
 	if [ ! -e "$STATE/xfwm4-workspace-count.orig" ]; then
 		xfconf-query -c xfwm4 -p /general/workspace_count > "$STATE/xfwm4-workspace-count.orig" 2>/dev/null \
 			|| echo unset > "$STATE/xfwm4-workspace-count.orig"
@@ -500,6 +553,7 @@ elif ! command -v xfconf-query >/dev/null || [ -z "$(pick_panel)" ]; then
 	warn "Start xfce4-panel once, then run:  bash install.sh --config-only"
 else
 	log "Configuring xfce4-panel"
+	backup_once "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml"
 	P=$(pick_panel)
 	ids=$(panel_ids "$P")
 	echo "Using panel-$P"

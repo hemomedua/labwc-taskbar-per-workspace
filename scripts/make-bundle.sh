@@ -18,6 +18,7 @@ cp "$DEB" "$B/files/"
 # 3. installer and documentation
 cp install.sh "$B/install.sh"
 cp docs/OFFLINE.md "$B/README.txt"
+cp docs/UNINSTALL.md "$B/UNINSTALL.txt"
 
 # 4. complete corresponding source (GPL): upstream labwc 0.9.8 + our patches + build scripts
 rm -rf /tmp/labwc-src

@@ -45,6 +45,13 @@ xfconf, depending on the plugin version). Existing `rc.xml`/`menu.xml` are merge
 first-run backups are kept as `*.orig-ws`. `labwc` mode refuses to run with another labwc version.
 Other Wayland compositors and other labwc versions are not supported (the patch is version specific).
 
+## Remove / recover
+
+`bash install.sh --uninstall` removes everything and restores the backed-up files (`*.orig-ws`); every step is
+independent, so a failing step does not stop the others. `bash install.sh --status` prints a read-only report.
+Recovery if the desktop does not start, manual removal without the script, and what to do after system
+updates: [docs/UNINSTALL.md](docs/UNINSTALL.md) (also shipped in the offline bundle as `UNINSTALL.txt`).
+
 The `.deb` diverts `/usr/bin/labwc` (original kept as `/usr/bin/labwc.distrib`);
 `sudo apt remove labwc-taskbar-workspace` restores it.
 

@@ -17,7 +17,8 @@ USE / ИСПОЛЬЗОВАНИЕ
   cd ws-switcher
   bash install.sh              # the mode (labwc / xfwm4) is detected automatically
   bash install.sh --offline    # never touch the network, use only files/ (labwc mode)
-  bash install.sh --uninstall  # remove everything and restore the backups
+  bash install.sh --uninstall  # remove everything and restore the backups  (see UNINSTALL.txt)
+  bash install.sh --status     # read-only report of what is installed (attach it to bug reports)
 
 Run it as a normal user from the graphical session's terminal (sudo is asked for apt only).
 Запускать от обычного пользователя в терминале графической сессии (sudo нужен только для apt).
@@ -31,6 +32,7 @@ CONTENTS / СОСТАВ
   files/deps/*.deb                wtype, xfce4-genmon-plugin, xdotool, libxdo3 (trixie arm64), used only when apt
                                   cannot install them (no network)
   source/                         full corresponding source: upstream labwc 0.9.8, our patches, build scripts
+  UNINSTALL.txt                   how to remove everything / what to do after a failure (EN + RU)
   SHA256SUMS                      checksums, verified by install.sh
   LICENSE-labwc-GPL-2.0.txt       GPL-2.0 (labwc and the patches are GPL-2.0-only)
 
