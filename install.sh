@@ -1,11 +1,16 @@
 #!/bin/bash
-# labwc-taskbar-per-workspace: one-shot installer for Raspberry Pi OS (Debian trixie, arm64)
+# labwc-taskbar-per-workspace: installer for Debian-based systems (Raspberry Pi OS, Kali, Debian, ...)
 #
-#   * installs the patched labwc 0.9.8 (.deb from the latest GitHub release of this repository)
-#   * configures two workspaces (W-F11 / W-F12), per-workspace taskbar, window menu with
-#     check marks, and - for xfce4-panel - a workspace button and a "send window" button
+# It detects the desktop and picks a mode:
+#   labwc  (Wayland, Raspberry Pi OS trixie, arm64, labwc 0.9.8)
+#          installs the patched labwc, two workspaces (W-F11 / W-F12), a taskbar that shows only the
+#          windows of the current workspace, a window menu with check marks
+#   xfwm4  (X11, Xfce: Kali, Debian/Ubuntu Xfce, ...)
+#          no patch needed: sets two workspaces and makes the tasklist per-workspace
+# In both modes an xfce4-panel gets a workspace button (SVG icon 1/2, click = switch) and a
+# "window menu" button.
 #
-# Usage:  bash install.sh [--config-only] [--no-panel] [--keep-pager] [--uninstall]
+# Usage:  bash install.sh [--mode labwc|xfwm4] [--config-only] [--no-panel] [--keep-pager] [--uninstall]
 #   --config-only   do not install packages, only (re)write the configuration
 #   --no-panel      do not touch the xfce4-panel configuration
 #   --keep-pager    keep the xfce4 "pager" plugin on the panel (removed by default)
@@ -17,21 +22,28 @@ set -euo pipefail
 REPO="hemomedua/labwc-taskbar-per-workspace"
 PKG="labwc-taskbar-workspace"
 CONF="$HOME/.config/labwc"
+STATE="$HOME/.config/ws-switcher"
 PANEL_DIR="$HOME/.config/xfce4/panel"
 BIN="$HOME/.local/bin"
 ICONS="$HOME/.local/share/icons"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "$XDG_RUNTIME_DIR/bus" ]; then
+	export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+fi
+if [ -z "${DISPLAY:-}" ] && [ -S /tmp/.X11-unix/X0 ]; then export DISPLAY=:0; fi
 
-CONFIG_ONLY=0; NO_PANEL=0; KEEP_PAGER=0; UNINSTALL=0
-for arg in "$@"; do
-	case "$arg" in
+MODE=auto; CONFIG_ONLY=0; NO_PANEL=0; KEEP_PAGER=0; UNINSTALL=0
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--mode) shift; MODE="${1:-}"; case "$MODE" in labwc|xfwm4) ;; *) echo "--mode needs labwc or xfwm4" >&2; exit 2 ;; esac ;;
 	--config-only) CONFIG_ONLY=1 ;;
 	--no-panel) NO_PANEL=1 ;;
 	--keep-pager) KEEP_PAGER=1 ;;
 	--uninstall) UNINSTALL=1 ;;
-	-h|--help) sed -n 2,16p "$0"; exit 0 ;;
-	*) echo "unknown option: $arg" >&2; exit 2 ;;
+	-h|--help) sed -n 2,22p "$0"; exit 0 ;;
+	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
+	shift
 done
 
 log()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
@@ -39,21 +51,42 @@ warn() { printf '\033[33mWARNING: %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" != 0 ] || die "run as a normal user (sudo is used only for apt)"
-mkdir -p "$CONF" "$BIN" "$ICONS"
+command -v apt-get >/dev/null || die "apt-get not found: this installer is for Debian-based systems"
+mkdir -p "$BIN" "$ICONS" "$STATE"
 
 # Keep a copy of the very first state of a file (not for files this script created itself).
 backup_once() {
 	[ -e "$1" ] && [ ! -e "$1.created-by-ws" ] && [ ! -e "$1.orig-ws" ] && cp -p "$1" "$1.orig-ws" || true
 }
 
-# ---------------------------------------------------------------- helpers
-panel_ids() { xfconf-query -c xfce4-panel -p /panels/panel-1/plugin-ids 2>/dev/null | grep -E '^[0-9]+$' || true; }
+# ---------------------------------------------------------------- panel helpers
+XQ() { xfconf-query -c xfce4-panel "$@"; }
+
+panel_numbers() { XQ -p /panels 2>/dev/null | grep -E '^[0-9]+$' || true; }
+panel_ids()     { XQ -p "/panels/panel-$1/plugin-ids" 2>/dev/null | grep -E '^[0-9]+$' || true; }
+plugin_type()   { XQ -p "/plugins/plugin-$1" 2>/dev/null || true; }
+
+# the panel that holds the tasklist (the "taskbar"); otherwise the first panel
+pick_panel() {
+	local p id first=""
+	for p in $(panel_numbers); do
+		[ -n "$first" ] || first=$p
+		for id in $(panel_ids "$p"); do
+			if [ "$(plugin_type "$id")" = tasklist ]; then echo "$p"; return; fi
+		done
+	done
+	echo "$first"
+}
 
 find_genmon_id() {
-	local f
+	local f p v
 	for f in "$PANEL_DIR"/genmon-*.rc; do
 		[ -e "$f" ] || continue
 		if grep -q 'ws-genmon.sh' "$f"; then basename "$f" .rc | sed 's/^genmon-//'; return; fi
+	done
+	for p in $(XQ -l 2>/dev/null | grep -E '^/plugins/plugin-[0-9]+/command$' || true); do
+		v=$(XQ -p "$p" 2>/dev/null || true)
+		case "$v" in *ws-genmon.sh*) echo "$p" | sed -E 's#^/plugins/plugin-([0-9]+)/.*#\1#'; return ;; esac
 	done
 }
 find_launcher_id() {
@@ -64,22 +97,60 @@ find_launcher_id() {
 	done
 }
 
+# genmon < 4.2.0 keeps its settings in ~/.config/xfce4/panel/genmon-N.rc, newer versions in xfconf
+write_genmon_config() { # ID COMMAND
+	local id=$1 cmd=$2 ver
+	ver=$(dpkg-query -W -f='${Version}' xfce4-genmon-plugin 2>/dev/null || echo 0)
+	if dpkg --compare-versions "$ver" ge 4.2.0; then
+		local P="/plugins/plugin-$id"
+		XQ -p "$P/command" -n -t string -s "$cmd"
+		XQ -p "$P/use-label" -n -t bool -s false
+		XQ -p "$P/text" -n -t string -s "(ws)"
+		XQ -p "$P/update-period" -n -t int -s 1000
+		XQ -p "$P/font" -n -t string -s "Sans 10"
+	else
+		cat > "$PANEL_DIR/genmon-$id.rc" <<EOF
+Command=$cmd
+UseLabel=0
+Text=(ws)
+UpdatePeriod=1000
+Font=Sans 10
+EOF
+	fi
+}
+
+# ---------------------------------------------------------------- mode detection
+detect_mode() {
+	[ "$MODE" = auto ] || return 0
+	if pgrep -x labwc >/dev/null 2>&1; then MODE=labwc
+	elif pgrep -x xfwm4 >/dev/null 2>&1; then MODE=xfwm4
+	elif dpkg -s labwc >/dev/null 2>&1 && ! dpkg -s xfwm4 >/dev/null 2>&1; then MODE=labwc
+	elif dpkg -s xfwm4 >/dev/null 2>&1; then MODE=xfwm4
+	else die "could not detect labwc or xfwm4; use --mode labwc or --mode xfwm4"; fi
+}
+
 # ---------------------------------------------------------------- uninstall
 if [ "$UNINSTALL" = 1 ]; then
 	log "Uninstalling"
 	if command -v xfconf-query >/dev/null; then
-		g=$(find_genmon_id); l=$(find_launcher_id)
-		ids=$(panel_ids)
-		if [ -n "$ids" ]; then
+		g=$(find_genmon_id || true); l=$(find_launcher_id || true)
+		for p in $(panel_numbers); do
+			ids=$(panel_ids "$p")
+			echo "$ids" | grep -qxE "${g:-x}|${l:-x}" || continue
 			args=()
 			for id in $ids; do
 				[ "$id" = "$g" ] || [ "$id" = "$l" ] || args+=(-t int -s "$id")
 			done
-			xfconf-query -c xfce4-panel -p /panels/panel-1/plugin-ids "${args[@]}"
-		fi
-		for id in $g $l; do xfconf-query -c xfce4-panel -p "/plugins/plugin-$id" -r -R 2>/dev/null || true; done
+			XQ -p "/panels/panel-$p/plugin-ids" "${args[@]}"
+		done
+		for id in $g $l; do XQ -p "/plugins/plugin-$id" -r -R 2>/dev/null || true; done
 		[ -z "$g" ] || rm -f "$PANEL_DIR/genmon-$g.rc"
 		[ -z "$l" ] || rm -rf "$PANEL_DIR/launcher-$l"
+		if [ -e "$STATE/xfwm4-workspace-count.orig" ]; then
+			orig=$(cat "$STATE/xfwm4-workspace-count.orig")
+			if [ "$orig" = unset ]; then xfconf-query -c xfwm4 -p /general/workspace_count -r 2>/dev/null || true
+			else xfconf-query -c xfwm4 -p /general/workspace_count -n -t int -s "$orig" 2>/dev/null || true; fi
+		fi
 	fi
 	for f in rc.xml menu.xml autostart themerc-override; do
 		if [ -e "$CONF/$f.orig-ws" ]; then mv -f "$CONF/$f.orig-ws" "$CONF/$f"
@@ -87,52 +158,66 @@ if [ "$UNINSTALL" = 1 ]; then
 	done
 	rm -f "$BIN"/ws-set.sh "$BIN"/ws-click.sh "$BIN"/ws-genmon.sh "$BIN"/ws-move-click.sh \
 		"$ICONS"/ws-1.svg "$ICONS"/ws-2.svg "$ICONS"/ws-move.svg "$XDG_RUNTIME_DIR/ws-current"
-	sudo apt-mark unhold labwc || true
-	sudo apt-get remove -y "$PKG" || true
-	log "Done. Reboot (or log out and in) to go back to the stock labwc."
+	rm -rf "$STATE"
+	if dpkg -s "$PKG" >/dev/null 2>&1; then
+		sudo apt-mark unhold labwc || true
+		sudo apt-get remove -y "$PKG" || true
+	fi
+	log "Done. Log out and in (or reboot). The pager plugin, if it was removed from the panel, is not restored."
 	exit 0
 fi
 
 # ---------------------------------------------------------------- preflight
 log "Checking the system"
-[ "$(uname -m)" = aarch64 ] || die "this package is built for arm64 (aarch64) only"
-# shellcheck disable=SC1091
+detect_mode
 . /etc/os-release
-[ "${VERSION_CODENAME:-}" = trixie ] || die "Debian/Raspberry Pi OS 13 (trixie) is required, found: ${PRETTY_NAME:-unknown}"
-labwc_ver=$(dpkg-query -W -f='${Version}' labwc 2>/dev/null || true)
-[ -n "$labwc_ver" ] || die "the labwc package is not installed"
-case "$labwc_ver" in
-0.9.8*) ;;
-*) die "labwc $labwc_ver is installed, but the patch is built for 0.9.8 (with libwlroots-0.19). Aborting to avoid breaking the session." ;;
-esac
-dpkg -s libwlroots-0.19 >/dev/null 2>&1 || die "libwlroots-0.19 is not installed"
-echo "OK: $PRETTY_NAME, labwc $labwc_ver"
+echo "System: ${PRETTY_NAME:-unknown}, mode: $MODE"
+if [ "$MODE" = labwc ]; then
+	[ "$(uname -m)" = aarch64 ] || die "the patched labwc package is built for arm64 (aarch64) only"
+	[ "${VERSION_CODENAME:-}" = trixie ] || die "labwc mode needs Debian/Raspberry Pi OS 13 (trixie), found: ${PRETTY_NAME:-unknown}"
+	labwc_ver=$(dpkg-query -W -f='${Version}' labwc 2>/dev/null || true)
+	[ -n "$labwc_ver" ] || die "the labwc package is not installed"
+	case "$labwc_ver" in
+	0.9.8*) ;;
+	*) die "labwc $labwc_ver is installed, but the patch is built for 0.9.8 (with libwlroots-0.19). Aborting to avoid breaking the session." ;;
+	esac
+	dpkg -s libwlroots-0.19 >/dev/null 2>&1 || die "libwlroots-0.19 is not installed"
+	echo "OK: labwc $labwc_ver"
+else
+	dpkg -s xfwm4 >/dev/null 2>&1 || die "xfwm4 is not installed"
+	echo "OK: xfwm4 $(dpkg-query -W -f='${Version}' xfwm4)"
+fi
 
 # ---------------------------------------------------------------- packages
 if [ "$CONFIG_ONLY" = 0 ]; then
-	log "Installing packages (wtype, xfce4-genmon-plugin, python3, curl)"
-	sudo apt-get install -y --no-install-recommends wtype xfce4-genmon-plugin python3 curl ca-certificates
+	if [ "$MODE" = labwc ]; then
+		log "Installing packages (wtype, xfce4-genmon-plugin, python3, curl)"
+		sudo apt-get install -y --no-install-recommends wtype xfce4-genmon-plugin python3 curl ca-certificates
 
-	log "Downloading the patched labwc"
-	tmp=$(mktemp -d); chmod 755 "$tmp"
-	url=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | python3 -c '
+		log "Downloading the patched labwc"
+		tmp=$(mktemp -d); chmod 755 "$tmp"
+		url=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | python3 -c '
 import json, sys
 for a in json.load(sys.stdin).get("assets", []):
     if a["name"].endswith("_arm64.deb"):
         print(a["browser_download_url"]); break')
-	[ -n "$url" ] || die "no .deb found in the latest release of $REPO"
-	echo "$url"
-	curl -fsSL -o "$tmp/$PKG.deb" "$url"
-	chmod 644 "$tmp/$PKG.deb"
-	sudo apt-get install -y "$tmp/$PKG.deb"
-	sudo apt-mark hold labwc
-	rm -rf "$tmp"
-else
+		[ -n "$url" ] || die "no .deb found in the latest release of $REPO"
+		echo "$url"
+		curl -fsSL -o "$tmp/$PKG.deb" "$url"
+		chmod 644 "$tmp/$PKG.deb"
+		sudo apt-get install -y "$tmp/$PKG.deb"
+		sudo apt-mark hold labwc
+		rm -rf "$tmp"
+	else
+		log "Installing packages (xdotool, xfce4-genmon-plugin)"
+		sudo apt-get install -y --no-install-recommends xdotool xfce4-genmon-plugin
+	fi
+elif [ "$MODE" = labwc ]; then
 	command -v python3 >/dev/null || die "python3 is required"
 fi
 
-# ---------------------------------------------------------------- scripts and icons
-log "Writing scripts and icons"
+# ---------------------------------------------------------------- icons
+log "Writing icons and scripts"
 cat > "$ICONS/ws-1.svg" <<'EOF'
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="32" height="32">
 <rect x="1" y="1" width="22" height="22" rx="5" fill="#3b82f6"/>
@@ -151,11 +236,13 @@ cat > "$ICONS/ws-move.svg" <<'EOF'
 <path d="M6 9 H18 M15 6 L18 9 L15 12 M18 15 H6 M9 12 L6 15 L9 18" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>
 EOF
-cat > "$BIN/ws-set.sh" <<'EOF'
+
+if [ "$MODE" = labwc ]; then
+	cat > "$BIN/ws-set.sh" <<'EOF'
 #!/bin/bash
 echo "$1" > "${XDG_RUNTIME_DIR:-/tmp}/ws-current"
 EOF
-cat > "$BIN/ws-click.sh" <<'EOF'
+	cat > "$BIN/ws-click.sh" <<'EOF'
 #!/bin/bash
 f=${XDG_RUNTIME_DIR:-/tmp}/ws-current
 n=1
@@ -163,7 +250,7 @@ n=1
 if [ "$n" = 1 ]; then k=F12; else k=F11; fi
 exec wtype -M logo -k "$k" -m logo
 EOF
-cat > "$BIN/ws-genmon.sh" <<'EOF'
+	cat > "$BIN/ws-genmon.sh" <<'EOF'
 #!/bin/bash
 f=${XDG_RUNTIME_DIR:-/tmp}/ws-current
 n=1
@@ -172,15 +259,37 @@ n=1
 echo "<img>$HOME/.local/share/icons/ws-$n.svg</img>"
 echo "<click>$HOME/.local/bin/ws-click.sh</click>"
 EOF
-cat > "$BIN/ws-move-click.sh" <<'EOF'
+	cat > "$BIN/ws-move-click.sh" <<'EOF'
 #!/bin/bash
 exec wtype -M alt -k space -m alt
 EOF
-chmod +x "$BIN"/ws-set.sh "$BIN"/ws-click.sh "$BIN"/ws-genmon.sh "$BIN"/ws-move-click.sh
+else
+	cat > "$BIN/ws-click.sh" <<'EOF'
+#!/bin/bash
+cur=$(xdotool get_desktop)
+if [ "$cur" = 0 ]; then xdotool set_desktop 1; else xdotool set_desktop 0; fi
+id=$(cat "$HOME/.config/ws-switcher/genmon-id" 2>/dev/null || true)
+[ -z "$id" ] || xfce4-panel --plugin-event="genmon-$id:refresh:bool:true" || true
+EOF
+	cat > "$BIN/ws-genmon.sh" <<'EOF'
+#!/bin/bash
+n=$(xdotool get_desktop 2>/dev/null || echo 0)
+[ "$n" = 1 ] && i=2 || i=1
+echo "<img>$HOME/.local/share/icons/ws-$i.svg</img>"
+echo "<click>$HOME/.local/bin/ws-click.sh</click>"
+EOF
+	cat > "$BIN/ws-move-click.sh" <<'EOF'
+#!/bin/bash
+exec xdotool key alt+space
+EOF
+fi
+chmod +x "$BIN"/ws-*.sh
 
 # ---------------------------------------------------------------- labwc configuration
-log "Configuring labwc"
-cat > /tmp/ws-merge.$$.py <<'PYEOF'
+if [ "$MODE" = labwc ]; then
+	log "Configuring labwc"
+	mkdir -p "$CONF"
+	cat > /tmp/ws-merge.$$.py <<'PYEOF'
 #!/usr/bin/env python3
 """Merge the labwc-taskbar-per-workspace settings into existing labwc XML files.
 
@@ -304,58 +413,78 @@ if __name__ == "__main__":
         sys.exit(__doc__)
 PYEOF
 
-# A user file replaces the system one completely, so start from the system file if the user has none.
-# Files created here get a ".created-by-ws" marker, so --uninstall can remove them again.
-seed() { # seed FILE SYSTEM_FILE
-	if [ ! -e "$1" ]; then
-		[ ! -e "$2" ] || cp "$2" "$1"
-		: > "$1.created-by-ws"
+	# A user file replaces the system one completely, so start from the system file if the user has none.
+	# Files created here get a ".created-by-ws" marker, so --uninstall can remove them again.
+	seed() { # seed FILE SYSTEM_FILE
+		if [ ! -e "$1" ]; then
+			[ ! -e "$2" ] || cp "$2" "$1"
+			: > "$1.created-by-ws"
+		fi
+	}
+	seed "$CONF/rc.xml" /etc/xdg/labwc/rc.xml
+	seed "$CONF/menu.xml" /etc/xdg/labwc/menu.xml
+	seed "$CONF/autostart" /etc/xdg/labwc/autostart
+	seed "$CONF/themerc-override" /nonexistent
+
+	for f in rc.xml menu.xml autostart themerc-override; do backup_once "$CONF/$f"; done
+
+	python3 /tmp/ws-merge.$$.py rc "$CONF/rc.xml" "$HOME"
+	python3 /tmp/ws-merge.$$.py menu "$CONF/menu.xml"
+	rm -f /tmp/ws-merge.$$.py
+
+	touch "$CONF/autostart"
+	grep -qF 'ws-current' "$CONF/autostart" || echo 'echo 1 > "$XDG_RUNTIME_DIR/ws-current"' >> "$CONF/autostart"
+
+	touch "$CONF/themerc-override"
+	sed -i '/^menu\.width\.\(min\|max\):/d' "$CONF/themerc-override"
+	printf '\nmenu.width.min: 260\nmenu.width.max: 420\n' >> "$CONF/themerc-override"
+
+	echo 1 > "$XDG_RUNTIME_DIR/ws-current"
+fi
+
+# ---------------------------------------------------------------- xfwm4 configuration
+if [ "$MODE" = xfwm4 ]; then
+	log "Configuring xfwm4 (two workspaces)"
+	command -v xfconf-query >/dev/null || die "xfconf-query not found"
+	if [ ! -e "$STATE/xfwm4-workspace-count.orig" ]; then
+		xfconf-query -c xfwm4 -p /general/workspace_count > "$STATE/xfwm4-workspace-count.orig" 2>/dev/null \
+			|| echo unset > "$STATE/xfwm4-workspace-count.orig"
 	fi
-}
-seed "$CONF/rc.xml" /etc/xdg/labwc/rc.xml
-seed "$CONF/menu.xml" /etc/xdg/labwc/menu.xml
-seed "$CONF/autostart" /etc/xdg/labwc/autostart
-seed "$CONF/themerc-override" /nonexistent
-
-for f in rc.xml menu.xml autostart themerc-override; do backup_once "$CONF/$f"; done
-
-python3 /tmp/ws-merge.$$.py rc "$CONF/rc.xml" "$HOME"
-python3 /tmp/ws-merge.$$.py menu "$CONF/menu.xml"
-rm -f /tmp/ws-merge.$$.py
-
-touch "$CONF/autostart"
-grep -qF 'ws-current' "$CONF/autostart" || echo 'echo 1 > "$XDG_RUNTIME_DIR/ws-current"' >> "$CONF/autostart"
-
-touch "$CONF/themerc-override"
-sed -i '/^menu\.width\.\(min\|max\):/d' "$CONF/themerc-override"
-printf '\nmenu.width.min: 260\nmenu.width.max: 420\n' >> "$CONF/themerc-override"
-
-echo 1 > "$XDG_RUNTIME_DIR/ws-current"
+	xfconf-query -c xfwm4 -p /general/workspace_count -n -t int -s 2
+fi
 
 # ---------------------------------------------------------------- xfce4-panel
 if [ "$NO_PANEL" = 1 ]; then
 	log "Skipping the panel (--no-panel)"
-elif ! command -v xfconf-query >/dev/null || [ -z "$(panel_ids)" ]; then
-	warn "xfce4-panel is not configured on this system (no panel-1 found); the panel buttons were skipped."
+elif ! command -v xfconf-query >/dev/null || [ -z "$(pick_panel)" ]; then
+	warn "xfce4-panel is not configured on this system (no panel found); the panel buttons were skipped."
 	warn "Start xfce4-panel once, then run:  bash install.sh --config-only"
 else
 	log "Configuring xfce4-panel"
-	ids=$(panel_ids)
+	P=$(pick_panel)
+	ids=$(panel_ids "$P")
+	echo "Using panel-$P"
+
+	if [ "$MODE" = xfwm4 ]; then
+		# show only the windows of the current workspace in every tasklist
+		for p in $(panel_numbers); do
+			for id in $(panel_ids "$p"); do
+				[ "$(plugin_type "$id")" = tasklist ] || continue
+				XQ -p "/plugins/plugin-$id/include-all-workspaces" -n -t bool -s false
+			done
+		done
+	fi
+
 	gid=$(find_genmon_id || true); lid=$(find_launcher_id || true)
 	max=0
-	for n in $ids $(xfconf-query -c xfce4-panel -l 2>/dev/null | grep -oE '^/plugins/plugin-[0-9]+' | sed 's/.*-//'); do
+	for n in $(for p in $(panel_numbers); do panel_ids "$p"; done) \
+		$(XQ -l 2>/dev/null | grep -oE '^/plugins/plugin-[0-9]+' | sed 's/.*-//'); do
 		[ "$n" -gt "$max" ] && max=$n
 	done
 	[ -n "$gid" ] || { max=$((max+1)); gid=$max; }
 	[ -n "$lid" ] || { max=$((max+1)); lid=$max; }
+	echo "$gid" > "$STATE/genmon-id"
 
-	cat > "$PANEL_DIR/genmon-$gid.rc" <<EOF
-Command=$BIN/ws-genmon.sh
-UseLabel=0
-Text=(ws)
-UpdatePeriod=1000
-Font=Sans 10
-EOF
 	mkdir -p "$PANEL_DIR/launcher-$lid"
 	cat > "$PANEL_DIR/launcher-$lid/ws-move-1.desktop" <<EOF
 [Desktop Entry]
@@ -367,45 +496,48 @@ Exec=$BIN/ws-move-click.sh
 Terminal=false
 StartupNotify=false
 EOF
-	xfconf-query -c xfce4-panel -p "/plugins/plugin-$gid" -n -t string -s genmon
-	xfconf-query -c xfce4-panel -p "/plugins/plugin-$lid" -n -t string -s launcher
-	xfconf-query -c xfce4-panel -p "/plugins/plugin-$lid/items" -n -a -t string -s ws-move-1.desktop
+	XQ -p "/plugins/plugin-$gid" -n -t string -s genmon
+	write_genmon_config "$gid" "$BIN/ws-genmon.sh"
+	XQ -p "/plugins/plugin-$lid" -n -t string -s launcher
+	XQ -p "/plugins/plugin-$lid/items" -n -a -t string -s ws-move-1.desktop
 
 	# anchor: the application menu (whiskermenu / applicationsmenu), otherwise the first plugin
 	anchor=""
 	for kind in whiskermenu applicationsmenu; do
 		for id in $ids; do
-			t=$(xfconf-query -c xfce4-panel -p "/plugins/plugin-$id" 2>/dev/null || true)
-			if [ "$t" = "$kind" ] && [ -z "$anchor" ]; then anchor=$id; fi
+			if [ "$(plugin_type "$id")" = "$kind" ] && [ -z "$anchor" ]; then anchor=$id; fi
 		done
 	done
 	[ -n "$anchor" ] || anchor=$(echo "$ids" | head -1)
 
 	args=()
 	for id in $ids; do
-		[ "$id" = "$gid" ] || [ "$id" = "$lid" ] && continue
-		if [ "$KEEP_PAGER" = 0 ]; then
-			t=$(xfconf-query -c xfce4-panel -p "/plugins/plugin-$id" 2>/dev/null || true)
-			[ "$t" = pager ] && continue
-		fi
+		if [ "$id" = "$gid" ] || [ "$id" = "$lid" ]; then continue; fi
+		if [ "$KEEP_PAGER" = 0 ] && [ "$(plugin_type "$id")" = pager ]; then continue; fi
 		args+=(-t int -s "$id")
-		[ "$id" = "$anchor" ] && args+=(-t int -s "$gid" -t int -s "$lid")
+		if [ "$id" = "$anchor" ]; then args+=(-t int -s "$gid" -t int -s "$lid"); fi
 	done
-	xfconf-query -c xfce4-panel -p /panels/panel-1/plugin-ids "${args[@]}"
+	XQ -p "/panels/panel-$P/plugin-ids" "${args[@]}"
 fi
 
 # ---------------------------------------------------------------- apply
 log "Applying"
-pkill -HUP -x labwc 2>/dev/null || true
-sleep 1
+if [ "$MODE" = labwc ]; then
+	pkill -HUP -x labwc 2>/dev/null || true
+	sleep 1
+fi
 if [ "$NO_PANEL" = 0 ] && pgrep -x xfce4-panel >/dev/null; then xfce4-panel -r || true; fi
 
-dpkg -s "$PKG" >/dev/null 2>&1 || warn "the $PKG package is not installed: stock labwc ignores the per-workspace taskbar option."
-running=$(readlink "/proc/$(pgrep -x labwc | head -1)/exe" 2>/dev/null || true)
 echo
 echo "Done."
-case "$running" in
-*labwc.distrib*) echo "The running session still uses the stock labwc: save your work and reboot (or log out and in) to activate the patched one." ;;
-"") echo "labwc is not running in this session; the patched labwc will be used at the next login." ;;
-*) echo "The patched labwc is already running." ;;
-esac
+if [ "$MODE" = labwc ]; then
+	dpkg -s "$PKG" >/dev/null 2>&1 || warn "the $PKG package is not installed: stock labwc ignores the per-workspace taskbar option."
+	running=$(readlink "/proc/$(pgrep -x labwc | head -1)/exe" 2>/dev/null || true)
+	case "$running" in
+	*labwc.distrib*) echo "The running session still uses the stock labwc: save your work and reboot (or log out and in) to activate the patched one." ;;
+	"") echo "labwc is not running in this session; the patched labwc will be used at the next login." ;;
+	*) echo "The patched labwc is already running." ;;
+	esac
+else
+	echo "xfwm4 now has 2 workspaces. The window menu (right click on the title bar or Alt+Space) is xfwm4's own."
+fi

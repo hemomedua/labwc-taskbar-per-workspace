@@ -24,19 +24,26 @@ the handles are destroyed and re-created. The option is off by default.
 * `scripts/build.sh` – builds labwc 0.9.8 + patch for Debian trixie arm64 and makes a `.deb`
 * `.github/workflows/build.yml` – runs the build on GitHub Actions (arm64), publishes the `.deb` as a release
 
-## Install (Raspberry Pi OS trixie, arm64, labwc 0.9.8)
+## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/hemomedua/labwc-taskbar-per-workspace/main/install.sh -o install.sh
 less install.sh      # read it first
-bash install.sh      # options: --config-only  --no-panel  --keep-pager  --uninstall
+bash install.sh      # options: --mode labwc|xfwm4  --config-only  --no-panel  --keep-pager  --uninstall
 ```
 
-The script checks the system (it refuses to run with another labwc version), installs the patched
-labwc from the latest release, and configures: two workspaces, `W-F11`/`W-F12`, per-workspace taskbar,
-the window menu with check marks, and for xfce4-panel a workspace button (SVG icon 1/2) and a
-"send window to the other workspace" button. Existing `rc.xml`/`menu.xml` are merged, not overwritten;
-first-run backups are kept as `*.orig-ws`. Reboot afterwards.
+The installer detects the desktop and picks a mode:
+
+| Mode | Where | What it does |
+|---|---|---|
+| `labwc` | Raspberry Pi OS trixie, arm64, labwc 0.9.8 (Wayland) | installs the patched labwc from the latest release, two workspaces (`W-F11`/`W-F12`), per-workspace taskbar, window menu with check marks |
+| `xfwm4` | X11 with Xfce (Kali, Debian/Ubuntu Xfce, ...) | no patch needed: sets two workspaces in xfwm4 and makes every xfce4-panel tasklist show only the current workspace; xfwm4 has its own window menu |
+
+In both modes an xfce4-panel gets a workspace button (SVG icon 1/2, click = switch) and a "window menu"
+button next to the application menu (genmon settings are written either to the old `genmon-N.rc` files or to
+xfconf, depending on the plugin version). Existing `rc.xml`/`menu.xml` are merged, not overwritten;
+first-run backups are kept as `*.orig-ws`. `labwc` mode refuses to run with another labwc version.
+Other Wayland compositors and other labwc versions are not supported (the patch is version specific).
 
 The `.deb` diverts `/usr/bin/labwc` (original kept as `/usr/bin/labwc.distrib`);
 `sudo apt remove labwc-taskbar-workspace` restores it.
@@ -49,4 +56,4 @@ Status: experimental, tested on Raspberry Pi OS (trixie), Raspberry Pi 4B.
 
 Патч для labwc 0.9.8: панели задач показывают только окна текущего рабочего стола.
 Включается опцией `<desktops><taskbarCurrentWorkspaceOnly>yes</taskbarCurrentWorkspaceOnly></desktops>`
-в `~/.config/labwc/rc.xml`. Установка и настройка одной командой: см. раздел Install выше (`install.sh`), готовый `.deb` — в разделе Releases.
+в `~/.config/labwc/rc.xml`. Установка и настройка одной командой: раздел Install выше (`install.sh`, режимы `labwc` и `xfwm4` определяются сами; на Kali/Xfce патч не нужен). Готовый `.deb` — в разделе Releases.
