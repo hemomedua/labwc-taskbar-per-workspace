@@ -22,7 +22,7 @@ cp docs/OFFLINE.md "$B/README.txt"
 # 4. complete corresponding source (GPL): upstream labwc 0.9.8 + our patches + build scripts
 rm -rf /tmp/labwc-src
 git clone --depth 1 --branch 0.9.8 https://github.com/labwc/labwc /tmp/labwc-src
-cp /tmp/labwc-src/COPYING "$B/LICENSE-labwc-GPL-2.0.txt"
+cp /tmp/labwc-src/LICENSE "$B/LICENSE-labwc-GPL-2.0.txt"
 git -C /tmp/labwc-src archive --format=tar.gz --prefix=labwc-0.9.8/ HEAD > "$B/source/labwc-0.9.8-upstream-src.tar.gz"
 cp patches/*.patch "$B/source/patches/"
 cp scripts/build.sh scripts/ci-setup.sh "$B/source/"
